@@ -6,9 +6,6 @@ Raganork MD - Sourav KL11
 const {
     getString
 } = require('./misc/lang');
-const {
-      saveMessage
-  } = require('./misc/saveMessage');
 const Lang = getString('group');
 const {
     isAdmin,
@@ -104,45 +101,59 @@ Module({
     
     return await message.client.groupLeave(message.jid);
 }))
+// QUOTED - COPYRIGHT: souravkl11/raganork
 Module({
     pattern: 'quoted',
     fromMe: true,
     desc:"Sends replied message's replied message. Useful for recovering deleted messages."
 }, (async (message, match) => {
-    if (!message.isGroup) return await message.sendReply(Lang.GROUP_COMMAND)
     try {
-    var msg = (await message.client.getMessages(message.jid)).filter(e=>e.key.id===message.reply_message.id)
+    var msg = await message.client.store.toJSON()?.messages[message.jid]?.toJSON().filter(e=>e.key.id===message.reply_message.id)
     var quoted = msg[0].message[Object.keys(msg[0].message)].contextInfo;
-    var obj = {
-        key: {
-          remoteJid: message.jid,
-          fromMe: quoted.participant===message.myjid+"@s.whatsapp.net",
-          id: quoted.stanzaId,
-          participant: quoted.participant
-        },
-        message: quoted.quotedMessage
-      }
+    var quoted2 = await message.client.store.toJSON()?.messages[message.jid]?.toJSON().filter(e=>e.key.id===quoted.stanzaId)
+    if (quoted2.length) return await message.forwardMessage(message.jid,quoted2[0]);
+    var obj = {key: {remoteJid: message.jid,fromMe: true,id: quoted.stanzaId,participant: quoted.participant},message: quoted.quotedMessage}
     return await message.forwardMessage(message.jid,obj);
     } catch { return await message.sendReply("_Failed to load message!_") }
-})) /*
-=============== WORK IN PROGRESS ================
+})) 
 Module({
     pattern: 'msgs ?(.*)',
     fromMe: true,
     desc:"Shows number of messages sent by each member. (Only from when bot was set up)"
 }, (async (message, match) => {
     if (!message.isGroup) return await message.sendReply(Lang.GROUP_COMMAND)
-    var user = message.mention[0];
-    try {
-    if (user) {
-    var msg = (await message.client.getMessages(message.jid)).filter(e=>e.key.participant===user);
-    return await message.client.sendMessage(message.jid,{text:`_@${user.split("@")[0]} has ${msg.length} messages._`,mentions:[user]})
-    } else {
-    var msg = (await message.client.getMessages(message.jid))   
+    var m = message; var conn = message.client;
+    let msgs = await conn.getMessages(m.jid);
+    var users = (await conn.groupMetadata(m.jid)).participants.map(e=>e.id);
+    if (message.mention[0]) users = message.mention;
+    if (message.reply_message && !message.mention.length) users = message.reply_message.jid;
+    function timeSince(date){var seconds=Math.floor((new Date()-date)/1000);var interval=seconds/31536000;if(interval>1){return Math.floor(interval)+" years ago"}
+    interval=seconds/2592000;if(interval>1){return Math.floor(interval)+" months ago"}
+    interval=seconds/86400;if(interval>1){return Math.floor(interval)+" days ago"}
+    interval=seconds/3600;if(interval>1){return Math.floor(interval)+" hours ago"}
+    interval=seconds/60;if(interval>1){return Math.floor(interval)+" minutes ago"}
+    return Math.floor(seconds)+" seconds ago"};
+    const flc = (x) => {
+    if (x === "undefined") x = "others"
+    try { return x.charAt(0).toUpperCase() + x.slice(1) } catch { return x }
     }
-    } catch { return await message.sendReply("_Failed to count messages!_") }
+    let final_msg = "_Messages sent by each users_\n\n";
+    for (let user of users){
+    if (Object.keys(msgs).includes(user)){
+    let count = msgs[user].total
+    let name = msgs[user].name?.replace( /[\r\n]+/gm, "" )
+    let lastMsg = timeSince(msgs[user].time)
+    let types = msgs[user].type
+    let types_msg = "\n"
+    for (var type in types){
+        types_msg+=`_${flc(type)}: *${types[type]}*_\n`
+    } 
+    final_msg+=`_Participant: *+${user.split("@")[0]}*_\n_Name: *${name}*_\n_Total msgs: *${count}*_\n_Last msg: *${lastMsg}*_${types_msg}\n\n`
+}
+}
+return await m.sendReply(final_msg)
+
 }))
-*/
 Module({
     pattern: 'demote ?(.*)',
     fromMe: true,
@@ -161,7 +172,7 @@ Module({
     await message.client.groupParticipantsUpdate(message.jid, [message.reply_message.jid], "demote")
 }))
 Module({
-    pattern: 'mute',
+    pattern: 'mute ?(.*)',
     use: 'group',
     fromMe: true,
     desc: Lang.MUTE_DESC,
@@ -171,10 +182,10 @@ Module({
     var admin = await isAdmin(message);
     if (!admin) return await message.sendReply(Lang.NOT_ADMIN)
     if (match[1]){
-    const h2m = function(h){console.log(1000*60*60*h)}
-    const m2m = function(m){console.log(1000*60*m)}
+    const h2m = function(h){return (1000*60*60*h)}
+    const m2m = function(m){return (1000*60*m)}
     let duration = match[1].endsWith("h") ? h2m(match[1].match(/\d+/)[0]) : m2m(match[1].match(/\d+/)[0])
-    match = match[1].endsWith("h") ? match[1]+'ours' : match[1]+'ins'
+    match = match[1].endsWith("h") ? match[1]+'ours' : match[1]+'mins'
     await message.client.groupSettingUpdate(message.jid, 'announcement')
     await message.send(`_Muted for ${match}_`)
     await require("timers/promises").setTimeout(duration);
@@ -230,6 +241,52 @@ Module({
     if (!admin) return await message.sendReply(Lang.NOT_ADMIN)
     await message.client.groupRevokeInvite(message.jid)
     await message.send(Lang.REVOKED)
+}))
+Module({
+    pattern: 'glock ?(.*)',
+    fromMe: true,
+    use: 'group',
+    desc: "Change group settings to allow only admins to edit group's info!"
+}, (async (message, match) => {
+    if (!message.isGroup) return await message.sendReply(Lang.GROUP_COMMAND)
+    if (!(await isAdmin(message))) return await message.sendReply(Lang.NOT_ADMIN)
+    return await message.client.groupSettingUpdate(message.jid,"locked")
+}))
+Module({
+    pattern: 'gunlock ?(.*)',
+    fromMe: true,
+    use: 'group',
+    desc: "Change group settings to allow everyone to edit group's info!"
+}, (async (message, match) => {
+    if (!message.isGroup) return await message.sendReply(Lang.GROUP_COMMAND)
+    if (!(await isAdmin(message))) return await message.sendReply(Lang.NOT_ADMIN)
+    return await message.client.groupSettingUpdate(message.jid,"unlocked")
+}))
+Module({
+    pattern: 'gname ?(.*)',
+    fromMe: true,
+    use: 'group',
+    desc: "Change group subject"
+}, (async (message, match) => {
+    if (!message.isGroup) return await message.sendReply(Lang.GROUP_COMMAND)
+    let newName = match[1] || message.reply_message?.text
+    if (!newName) return await message.sendReply("_Need text!_")
+    var {restrict} = await message.client.groupMetadata(message.jid);
+    if (restrict && !(await isAdmin(message))) return await message.sendReply(Lang.NOT_ADMIN)
+    return await message.client.groupUpdateSubject(message.jid,(match[1] || message.reply_message?.text).slice(0,25))
+}))
+Module({
+    pattern: 'gdesc ?(.*)',
+    fromMe: true,
+    use: 'group',
+    desc: "Change group description"
+}, (async (message, match) => {
+    if (!message.isGroup) return await message.sendReply(Lang.GROUP_COMMAND)
+    let newName = match[1] || message.reply_message?.text
+    if (!newName) return await message.sendReply("_Need text!_")
+    var {restrict} = await message.client.groupMetadata(message.jid);
+    if (restrict && !(await isAdmin(message))) return await message.sendReply(Lang.NOT_ADMIN)
+    try { return await message.client.groupUpdateDescription(message.jid,(match[1] || message.reply_message?.text).slice(0,512)) } catch { return await message.sendReply("_Failed to change!_")}
 }))
 Module({
     pattern: 'common ?(.*)',
